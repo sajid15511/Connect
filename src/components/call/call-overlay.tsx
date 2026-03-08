@@ -1,19 +1,24 @@
 "use client";
 
-import { useSession } from "next-auth/react";
 import { useAppStore } from "@/stores/app-store";
 import { useCall } from "@/hooks/use-call";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff } from "lucide-react";
-import { useRef, useState, useEffect } from "react";
+import { useState } from "react";
 
 export function CallOverlay() {
-  const { data: session } = useSession();
   const { callState, users } = useAppStore();
-  const { acceptCall, rejectCall, endCall, localVideoRef, remoteVideoRef } = useCall({
-    userId: session?.user?.id ?? "",
-  });
+  const {
+    acceptCall,
+    rejectCall,
+    endCall,
+    setMicEnabled,
+    setCameraEnabled,
+    setLocalVideoRef,
+    setRemoteVideoRef,
+    setRemoteAudioRef,
+  } = useCall();
 
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
@@ -24,19 +29,15 @@ export function CallOverlay() {
     users.find((u) => u._id === callState.peerId)?.name || callState.peerName;
 
   const toggleMute = () => {
-    if (localVideoRef.current?.srcObject) {
-      const stream = localVideoRef.current.srcObject as MediaStream;
-      stream.getAudioTracks().forEach((t) => (t.enabled = muted));
-      setMuted(!muted);
-    }
+    const nextMuted = !muted;
+    setMicEnabled(!nextMuted);
+    setMuted(nextMuted);
   };
 
   const toggleCamera = () => {
-    if (localVideoRef.current?.srcObject) {
-      const stream = localVideoRef.current.srcObject as MediaStream;
-      stream.getVideoTracks().forEach((t) => (t.enabled = cameraOff));
-      setCameraOff(!cameraOff);
-    }
+    const nextCameraOff = !cameraOff;
+    setCameraEnabled(!nextCameraOff);
+    setCameraOff(nextCameraOff);
   };
 
   return (
@@ -46,14 +47,14 @@ export function CallOverlay() {
         {callState.type === "video" && callState.status === "connected" ? (
           <div className="relative">
             <video
-              ref={remoteVideoRef}
+              ref={setRemoteVideoRef}
               autoPlay
               playsInline
               className="h-[60vh] max-w-[80vw] rounded-xl bg-gray-900 object-cover"
             />
             {/* Local video pip */}
             <video
-              ref={localVideoRef}
+              ref={setLocalVideoRef}
               autoPlay
               playsInline
               muted
@@ -84,6 +85,9 @@ export function CallOverlay() {
             </p>
           </div>
         )}
+
+        {/* Remote audio sink for audio-only calls and fallback playback */}
+        <audio ref={setRemoteAudioRef} autoPlay playsInline className="hidden" />
 
         {/* Controls */}
         <div className="flex gap-4">

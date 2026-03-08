@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024; // 20MB per file
+export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
+
 export const registerSchema = z.object({
   name: z.string().min(2).max(100),
   email: z.string().email(),
@@ -38,9 +41,36 @@ export const createChatSchema = z.object({
   name: z.string().optional(),
 });
 
+export const messageAttachmentSchema = z.object({
+  key: z.string().min(1).max(1024),
+  fileName: z.string().min(1).max(255),
+  mimeType: z.string().min(1).max(255),
+  size: z.number().int().positive().max(MAX_ATTACHMENT_SIZE_BYTES),
+});
+
 export const sendMessageSchema = z.object({
   chatId: z.string(),
-  content: z.string().min(1).max(5000),
+  content: z
+    .string()
+    .max(5000)
+    .optional()
+    .transform((value) => value?.trim() ?? ""),
+  attachments: z.array(messageAttachmentSchema).max(MAX_ATTACHMENTS_PER_MESSAGE).optional().default([]),
+}).superRefine((data, ctx) => {
+  if (!data.content && data.attachments.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Message must include text or at least one attachment",
+      path: ["content"],
+    });
+  }
+});
+
+export const createUploadUrlSchema = z.object({
+  chatId: z.string(),
+  fileName: z.string().min(1).max(255),
+  contentType: z.string().min(1).max(255),
+  size: z.number().int().positive().max(MAX_ATTACHMENT_SIZE_BYTES),
 });
 
 // Tenant admin schemas
@@ -58,6 +88,8 @@ export type CreateEmployeeInput = z.infer<typeof createEmployeeSchema>;
 export type UpdateEmployeeInput = z.infer<typeof updateEmployeeSchema>;
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
 export type CreateChatInput = z.infer<typeof createChatSchema>;
+export type MessageAttachmentInput = z.infer<typeof messageAttachmentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
+export type CreateUploadUrlInput = z.infer<typeof createUploadUrlSchema>;
 export type CreateOrganizationInput = z.infer<typeof createOrganizationSchema>;
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;

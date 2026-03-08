@@ -70,7 +70,7 @@ export function ChatPanel() {
     userId: session?.user?.id ?? "",
     organizationId: session?.user?.organizationId ?? "",
   });
-  const { startCall } = useCall({ userId: session?.user?.id ?? "" });
+  const { startCall } = useCall();
 
   const [input, setInput] = useState("");
   const scrollContainerRef = useRef<HTMLDivElement>(null);

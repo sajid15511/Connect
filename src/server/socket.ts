@@ -9,7 +9,21 @@ const MessageSchema = new mongoose.Schema(
   {
     chatId: { type: mongoose.Schema.Types.ObjectId, ref: "Chat", required: true },
     senderId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    content: { type: String, required: true },
+    content: { type: String, default: "" },
+    attachments: {
+      type: [
+        new mongoose.Schema(
+          {
+            key: { type: String, required: true },
+            fileName: { type: String, required: true },
+            mimeType: { type: String, required: true },
+            size: { type: Number, required: true },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
@@ -39,7 +53,7 @@ const UserSchema = new mongoose.Schema(
 
 const Message = mongoose.models.Message || mongoose.model("Message", MessageSchema);
 const Chat = mongoose.models.Chat || mongoose.model("Chat", ChatSchema);
-const User = mongoose.models.User || mongoose.model("User", UserSchema);
+const UserModel = mongoose.models.User || mongoose.model("User", UserSchema);
 
 // ── Types ──
 interface AuthPayload {
@@ -49,7 +63,13 @@ interface AuthPayload {
 
 interface SendMessagePayload {
   chatId: string;
-  content: string;
+  content?: string;
+  attachments?: {
+    key: string;
+    fileName: string;
+    mimeType: string;
+    size: number;
+  }[];
 }
 
 interface CallPayload {
@@ -112,6 +132,28 @@ io.on("connection", (socket: Socket) => {
   // ── Send message ──
   socket.on("message:send", async (payload: SendMessagePayload) => {
     try {
+      const content = typeof payload.content === "string" ? payload.content.trim() : "";
+      const expectedPrefix = `${socket.data.organizationId}/${payload.chatId}/`;
+      const attachments = Array.isArray(payload.attachments)
+        ? payload.attachments
+            .filter(
+              (item) =>
+                item &&
+                typeof item.key === "string" &&
+                item.key.startsWith(expectedPrefix) &&
+                typeof item.fileName === "string" &&
+                typeof item.mimeType === "string" &&
+                typeof item.size === "number" &&
+                item.size > 0 &&
+                item.size <= 20 * 1024 * 1024
+            )
+            .slice(0, 5)
+        : [];
+
+      if (!content && attachments.length === 0) {
+        return;
+      }
+
       await connectDB();
 
       const chat = await Chat.findOne({
@@ -125,10 +167,11 @@ io.on("connection", (socket: Socket) => {
       const message = await Message.create({
         chatId: payload.chatId,
         senderId: socket.data.userId,
-        content: payload.content,
+        content,
+        attachments,
       });
 
-      const populated = await message.populate("senderId", "name email");
+      const populated = await message.populate({ path: "senderId", select: "name email", model: UserModel });
 
       // Broadcast to all chat participants
       io.to(`chat:${payload.chatId}`).emit("message:receive", populated);

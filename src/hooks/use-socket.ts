@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
-import { useAppStore, type MessageItem } from "@/stores/app-store";
+import { useAppStore, type MessageAttachment, type MessageItem } from "@/stores/app-store";
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:3001";
 
@@ -103,8 +103,8 @@ export function useSocket({ userId, organizationId }: UseSocketParams) {
     }
   }, [activeChatId]);
 
-  const sendMessage = useCallback((chatId: string, content: string) => {
-    socketRef.current?.emit("message:send", { chatId, content });
+  const sendMessage = useCallback((chatId: string, content: string, attachments: MessageAttachment[] = []) => {
+    socketRef.current?.emit("message:send", { chatId, content, attachments });
   }, []);
 
   const startTyping = useCallback((chatId: string) => {

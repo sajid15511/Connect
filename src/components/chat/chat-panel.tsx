@@ -2,13 +2,28 @@
 
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useSession } from "next-auth/react";
-import { useAppStore, type ChatUser, type MessageItem } from "@/stores/app-store";
+import { useAppStore, type ChatUser, type MessageAttachment } from "@/stores/app-store";
 import { useSocket } from "@/hooks/use-socket";
 import { useCall } from "@/hooks/use-call";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { Phone, Video, Send, MessageSquare } from "lucide-react";
+import { Phone, Video, Send, MessageSquare, Paperclip, FileText, Download, X, Loader2 } from "lucide-react";
+
+const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
 
 function getInitials(name: string) {
   return name
@@ -28,6 +43,26 @@ function getSenderInfo(sender: ChatUser | string): { name: string; id: string } 
   return { name: sender.name, id: sender._id };
 }
 
+async function parseErrorMessage(response: Response) {
+  try {
+    const data = await response.json();
+    if (typeof data?.error === "string") {
+      return data.error;
+    }
+
+    if (data?.error && typeof data.error === "object") {
+      const first = Object.values(data.error).flat()[0];
+      if (typeof first === "string") {
+        return first;
+      }
+    }
+
+    return "Request failed";
+  } catch {
+    return "Request failed";
+  }
+}
+
 export function ChatPanel() {
   const { data: session } = useSession();
   const { activeChatId, chats, messages, onlineUsers, typingUsers, users } = useAppStore();
@@ -41,6 +76,7 @@ export function ChatPanel() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // @mention state
@@ -49,8 +85,19 @@ export function ChatPanel() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStartPos, setMentionStartPos] = useState(-1);
 
+  const [pendingAttachments, setPendingAttachments] = useState<MessageAttachment[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+
   const userId = session?.user?.id ?? "";
   const activeChat = chats.find((c) => c._id === activeChatId);
+
+  const canSend = Boolean(activeChatId) && !isUploading && (!!input.trim() || pendingAttachments.length > 0);
+
+  useEffect(() => {
+    setPendingAttachments([]);
+    setUploadError("");
+  }, [activeChatId]);
 
   // Typing indicator (computed early so useEffect can depend on it)
   const chatTypingUsers = activeChatId ? typingUsers.get(activeChatId) : undefined;
@@ -93,9 +140,15 @@ export function ChatPanel() {
   }, []);
 
   const handleSend = useCallback(() => {
-    if (!input.trim() || !activeChatId) return;
-    sendMessage(activeChatId, input.trim());
+    if (!activeChatId || isUploading) return;
+
+    const trimmedInput = input.trim();
+    if (!trimmedInput && pendingAttachments.length === 0) return;
+
+    sendMessage(activeChatId, trimmedInput, pendingAttachments);
     setInput("");
+    setPendingAttachments([]);
+    setUploadError("");
     setShowMentions(false);
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     stopTyping(activeChatId);
@@ -105,7 +158,119 @@ export function ChatPanel() {
         textareaRef.current.style.height = "auto";
       }
     }, 0);
-  }, [input, activeChatId, sendMessage, stopTyping]);
+  }, [activeChatId, input, isUploading, pendingAttachments, sendMessage, stopTyping]);
+
+  const handlePickFiles = useCallback(() => {
+    if (!activeChatId || isUploading) return;
+    fileInputRef.current?.click();
+  }, [activeChatId, isUploading]);
+
+  const handleRemovePendingAttachment = useCallback((key: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.key !== key));
+  }, []);
+
+  const handleFileSelect = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = "";
+
+      if (!activeChatId || files.length === 0 || isUploading) return;
+
+      const availableSlots = Math.max(MAX_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length, 0);
+      if (availableSlots === 0) {
+        setUploadError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
+        return;
+      }
+
+      const selectedFiles = files.slice(0, availableSlots);
+      const errors: string[] = [];
+      const uploaded: MessageAttachment[] = [];
+
+      if (files.length > selectedFiles.length) {
+        errors.push(`Only ${availableSlots} more file(s) can be attached.`);
+      }
+
+      setUploadError("");
+      setIsUploading(true);
+
+      for (const file of selectedFiles) {
+        if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+          errors.push(`${file.name} exceeds 20MB.`);
+          continue;
+        }
+
+        try {
+          const presignRes = await fetch("/api/uploads/presign", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chatId: activeChatId,
+              fileName: file.name,
+              contentType: file.type || "application/octet-stream",
+              size: file.size,
+            }),
+          });
+
+          if (!presignRes.ok) {
+            throw new Error(await parseErrorMessage(presignRes));
+          }
+
+          const presignData = (await presignRes.json()) as {
+            uploadUrl: string;
+            attachment: MessageAttachment;
+          };
+
+          const uploadRes = await fetch(presignData.uploadUrl, {
+            method: "PUT",
+            headers: {
+              "Content-Type": file.type || "application/octet-stream",
+            },
+            body: file,
+          });
+
+          if (!uploadRes.ok) {
+            throw new Error(`Upload failed for ${file.name}`);
+          }
+
+          uploaded.push(presignData.attachment);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : `Upload failed for ${file.name}`;
+          errors.push(message);
+        }
+      }
+
+      if (uploaded.length > 0) {
+        setPendingAttachments((prev) => [...prev, ...uploaded].slice(0, MAX_ATTACHMENTS_PER_MESSAGE));
+      }
+
+      if (errors.length > 0) {
+        setUploadError(errors[0]);
+      }
+
+      setIsUploading(false);
+    },
+    [activeChatId, isUploading, pendingAttachments.length]
+  );
+
+  const handleDownloadAttachment = useCallback(async (attachment: MessageAttachment) => {
+    try {
+      const params = new URLSearchParams({
+        key: attachment.key,
+        fileName: attachment.fileName,
+      });
+
+      const res = await fetch(`/api/uploads/download?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error(await parseErrorMessage(res));
+      }
+
+      const data = (await res.json()) as { url: string };
+      window.open(data.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not open file";
+      setUploadError(message);
+    }
+  }, []);
 
   const insertMention = useCallback(
     (user: ChatUser) => {
@@ -284,6 +449,8 @@ export function ChatPanel() {
           {messages.map((msg, i) => {
             const sender = getSenderInfo(msg.senderId);
             const isMe = sender.id === userId;
+            const messageAttachments = msg.attachments || [];
+            const hasTextContent = Boolean(msg.content?.trim());
             const showAvatar =
               i === 0 || getSenderInfo(messages[i - 1].senderId).id !== sender.id;
 
@@ -306,15 +473,43 @@ export function ChatPanel() {
                       {isMe ? "You" : sender.name}
                     </p>
                   )}
-                  <div
-                    className={`inline-block rounded-2xl px-4 py-2 text-sm whitespace-pre-wrap ${
-                      isMe
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-secondary text-secondary-foreground"
-                    }`}
-                  >
-                    {msg.content}
-                  </div>
+
+                  {hasTextContent && (
+                    <div
+                      className={`inline-block rounded-2xl px-4 py-2 text-sm whitespace-pre-wrap ${
+                        isMe
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-secondary text-secondary-foreground"
+                      }`}
+                    >
+                      {msg.content}
+                    </div>
+                  )}
+
+                  {messageAttachments.length > 0 && (
+                    <div className={`mt-2 space-y-1 ${isMe ? "ml-auto" : ""}`}>
+                      {messageAttachments.map((attachment) => (
+                        <button
+                          key={attachment.key}
+                          type="button"
+                          onClick={() => handleDownloadAttachment(attachment)}
+                          className={`flex w-full min-w-[220px] items-center justify-between gap-3 rounded-xl border px-3 py-2 text-left transition-colors hover:bg-accent/50 ${
+                            isMe ? "border-primary/30 bg-primary/5" : "border-border bg-muted/30"
+                          }`}
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                            <div className="min-w-0">
+                              <p className="truncate text-xs font-medium">{attachment.fileName}</p>
+                              <p className="text-[10px] text-muted-foreground">{formatFileSize(attachment.size)}</p>
+                            </div>
+                          </div>
+                          <Download className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   <p className="mt-0.5 text-[10px] text-muted-foreground">{formatTime(msg.createdAt)}</p>
                 </div>
               </div>
@@ -339,6 +534,14 @@ export function ChatPanel() {
       {/* Message Input */}
       <Separator />
       <div className="relative p-4">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFileSelect}
+        />
+
         {/* @Mention Dropdown */}
         {showMentions && filteredMentions.length > 0 && (
           <div className="absolute bottom-full left-4 right-4 mb-1 max-h-48 overflow-y-auto rounded-lg border bg-popover p-1 shadow-lg">
@@ -366,10 +569,47 @@ export function ChatPanel() {
           </div>
         )}
 
+        {pendingAttachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {pendingAttachments.map((attachment) => (
+              <div
+                key={attachment.key}
+                className="flex max-w-full items-center gap-2 rounded-md border bg-muted/40 px-2 py-1"
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium">{attachment.fileName}</p>
+                  <p className="text-[10px] text-muted-foreground">{formatFileSize(attachment.size)}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRemovePendingAttachment(attachment.key)}
+                  className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  aria-label="Remove attachment"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-end gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={handlePickFiles}
+            disabled={!activeChatId || isUploading || pendingAttachments.length >= MAX_ATTACHMENTS_PER_MESSAGE}
+            className="shrink-0"
+            title="Attach file"
+          >
+            {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+          </Button>
+
           <textarea
             ref={textareaRef}
-            placeholder="Type a message... (Enter to send, Ctrl+Enter for new line, @ to mention)"
+            placeholder="Type a message or attach files..."
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
@@ -377,13 +617,14 @@ export function ChatPanel() {
             className="flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             style={{ minHeight: "36px", maxHeight: "150px" }}
           />
-          <Button onClick={handleSend} disabled={!input.trim()} size="icon" className="shrink-0">
+          <Button onClick={handleSend} disabled={!canSend} size="icon" className="shrink-0">
             <Send className="h-4 w-4" />
           </Button>
         </div>
         <p className="mt-1 text-[10px] text-muted-foreground">
-          Enter to send · Ctrl+Enter for new line · @ to mention
+          Enter to send · Ctrl+Enter for new line · @ to mention · Max {MAX_ATTACHMENTS_PER_MESSAGE} files ({formatFileSize(MAX_ATTACHMENT_SIZE_BYTES)} each)
         </p>
+        {uploadError && <p className="mt-1 text-[11px] text-destructive">{uploadError}</p>}
       </div>
     </div>
   );

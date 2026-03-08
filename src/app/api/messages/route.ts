@@ -46,7 +46,13 @@ export const POST = withAuth(async (req, session) => {
 
   await connectDB();
 
-  const { chatId, content } = parsed.data;
+  const { chatId, content, attachments } = parsed.data;
+
+  const expectedPrefix = `${session.user.organizationId}/${chatId}/`;
+  const hasInvalidAttachment = attachments.some((attachment) => !attachment.key.startsWith(expectedPrefix));
+  if (hasInvalidAttachment) {
+    return NextResponse.json({ error: "Invalid attachment reference" }, { status: 400 });
+  }
 
   const chat = await Chat.findOne({
     _id: chatId,
@@ -62,6 +68,7 @@ export const POST = withAuth(async (req, session) => {
     chatId,
     senderId: session.user.id,
     content,
+    attachments,
   });
 
   const populated = await message.populate("senderId", "name email");

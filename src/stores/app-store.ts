@@ -18,11 +18,19 @@ export interface ChatItem {
   updatedAt?: string;
 }
 
+export interface MessageAttachment {
+  key: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface MessageItem {
   _id: string;
   chatId: string;
   senderId: ChatUser | string;
-  content: string;
+  content?: string;
+  attachments?: MessageAttachment[];
   createdAt: string;
 }
 
@@ -95,7 +103,11 @@ export const useAppStore = create<AppState>((set) => ({
   setUserOnline: (userId, online) =>
     set((s) => {
       const next = new Set(s.onlineUsers);
-      online ? next.add(userId) : next.delete(userId);
+      if (online) {
+        next.add(userId);
+      } else {
+        next.delete(userId);
+      }
       return { onlineUsers: next };
     }),
   setOnlineUsers: (userIds) => set({ onlineUsers: new Set(userIds) }),
@@ -105,7 +117,11 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => {
       const next = new Map(s.typingUsers);
       const chatTyping = new Set(next.get(chatId) || []);
-      isTyping ? chatTyping.add(userId) : chatTyping.delete(userId);
+      if (isTyping) {
+        chatTyping.add(userId);
+      } else {
+        chatTyping.delete(userId);
+      }
       next.set(chatId, chatTyping);
       return { typingUsers: next };
     }),
